@@ -6,7 +6,8 @@
 typedef struct Plot {
   size_t row;
   size_t col;
-  bool is_marked;
+  bool is_crawled;
+  bool is_counted;
   int perimeter;
   char region;
 } Plot;
@@ -61,7 +62,7 @@ void garden_print(Garden garden, bool compact) {
       if (compact) {
         printf(" %c ", plot->region);
       } else {
-        const char is_marked = plot->is_marked ? 'T' : 'F';
+        const char is_marked = plot->is_crawled ? 'T' : 'F';
         printf("[%lu x %lu]: <Plot(%c %c %d)>\n", i, j, plot->region, is_marked, plot->perimeter);
       }
     }
@@ -93,7 +94,7 @@ Garden build_garden(const GPtrArray* lines) {
   const size_t rows = lines->len;
   const size_t cols = strlen(g_ptr_array_index(lines, 0));
   Plot*** grid = calloc(sizeof(Plot**), rows);
-  GHashTable* regions = g_hash_table_new(g_str_hash, g_str_equal);
+  GHashTable* regions = g_hash_table_new_full(g_str_hash, g_str_equal, free, NULL);
 
   for (size_t i = 0; i < rows; i++) {
     Plot** plots_row = calloc(sizeof(Plot*), cols);
@@ -105,12 +106,11 @@ Garden build_garden(const GPtrArray* lines) {
       asprintf(&region, "%c", line[j]);
       g_hash_table_add(regions, region);
 
-      // Plot plot = {.row=i, .col=j, .is_marked=false, .perimeter=0, .region=line[j]};
-      // g_array_append_val(row, plot);
       Plot* plot = calloc(sizeof(Plot), 1);
       plot->row = i;
       plot->col = j;
-      plot->is_marked = false;
+      plot->is_crawled = false;
+      plot->is_counted = false;
       plot->perimeter = -1;
       plot->region = line[j];
       plots_row[j] = plot;
@@ -129,7 +129,7 @@ GPtrArray* crawl(Garden garden, Plot* start) {
   GQueue* q = g_queue_new();
 
   g_ptr_array_add(region_plots, start);
-  start->is_marked = true;
+  start->is_crawled = true;
   g_queue_push_tail(q, start);
 
   while (!g_queue_is_empty(q)) {
@@ -154,11 +154,11 @@ GPtrArray* crawl(Garden garden, Plot* start) {
       if (
         is_within_bounds &&
         garden.grid[row][col]->region == region &&
-        !garden.grid[row][col]->is_marked
+        !garden.grid[row][col]->is_crawled
       ) {
         Plot* neighbor = garden.grid[row][col];
         g_ptr_array_add(region_plots, neighbor);
-        neighbor->is_marked = TRUE;
+        neighbor->is_crawled = TRUE;
         g_queue_push_tail(q, neighbor);
       }
     }
@@ -167,15 +167,72 @@ GPtrArray* crawl(Garden garden, Plot* start) {
   return region_plots;
 }
 
-Region build_region(GPtrArray* region_plots, char region) {
-  Plot** plots = (Plot**)region_plots->pdata;
-  int area = region_plots->len;
+int calc_perimeter(const GPtrArray* region) {
   int perimeter = 0;
-  for (int k = 0; k < area; k++) {
-    Plot* plot = plots[k];
+  Plot** plots = (Plot**)region->pdata;
+  for (int k = 0; k < region->len; k++) {
+    const Plot* plot = plots[k];
     perimeter += plot->perimeter;
   }
-  int price = area * perimeter;
+  return perimeter;
+}
+
+int calc_perimeter_2(const GPtrArray* region) {
+  GPtrArray* plots[4] = {
+    g_ptr_array_new(),
+    g_ptr_array_new(),
+    g_ptr_array_new(),
+    g_ptr_array_new(),
+  };
+
+  for (int i = 0; i < region->len; i++) {
+    Plot* plot = g_ptr_array_index(region, i);
+    if (plot->perimeter > 0)
+      g_ptr_array_add(plots[0], plot);
+    if (plot->perimeter > 1)
+      g_ptr_array_add(plots[1], plot);
+    if (plot->perimeter > 2) {
+      g_ptr_array_add(plots[2], plot);
+    }
+    if (plot->perimeter > 3)
+      g_ptr_array_add(plots[3], plot);
+  }
+
+  for (int i = 0; i < 4; i++) {
+    GPtrArray* plot_grp = plots[i];
+
+    // Group of same row
+    GHashTable* same_row = g_hash_table_new(g_int_hash, g_int_equal);
+    for (int k = 0; k < plot_grp->len; k++) {
+      Plot* p = g_ptr_array_index(plot_grp, k);
+      GArray* coords = g_hash_table_lookup(same_row, p->row);
+      if (coords == NULL)
+        coords = g_array_new(FALSE, TRUE, sizeof(int));
+      g_array_append_val(coords, p->col);
+    }
+
+    // TODO
+
+    // Group of same col
+    GHashTable* same_col = g_hash_table_new(g_int_hash, g_int_equal);
+    for (int k = 0; k < plot_grp->len; k++) {
+      Plot* p = g_ptr_array_index(plot_grp, k);
+      GArray* coords = g_hash_table_lookup(same_col, p->col);
+      if (coords == NULL)
+        coords = g_array_new(FALSE, TRUE, sizeof(int));
+      g_array_append_val(coords, p->row);
+    }
+
+
+  }
+
+}
+
+Region build_region(const GPtrArray* region_plots, const char region) {
+  Plot** plots = (Plot**)region_plots->pdata;
+  const int area = region_plots->len;
+  const int perimeter = calc_perimeter(region_plots);
+  const int price = area * perimeter;
   return (Region){.region=region, .plots=plots, .area=area, .perimeter=perimeter, .price=price};
 }
 
@@ -186,7 +243,7 @@ int process(Garden garden, bool print_regions) {
     for (size_t j = 0; j < garden.cols; j++) {
       Plot* start = garden.grid[i][j];
 
-      if (!start->is_marked) {
+      if (!start->is_crawled) {
         // region is an array of Plot pointers
         GPtrArray* region_plots = crawl(garden, start);
         Region region = build_region(region_plots, start->region);
@@ -204,7 +261,7 @@ int process(Garden garden, bool print_regions) {
       printf("Region: area=%d, perimeter=%d, price=%d\n", region.area, region.perimeter, region.price);
       for (int n = 0; n < region.area; n++) {
         Plot* p = region.plots[n];
-        const char is_marked = p->is_marked ? 'T' : 'F';
+        const char is_marked = p->is_crawled ? 'T' : 'F';
         printf("[%lu x %lu]: <Plot(%c %c %d)>\n", p->row, p->col, p->region, is_marked, p->perimeter);
       }
       puts("");
@@ -227,7 +284,7 @@ int main(const int argc, char* argv[]) {
   // garden_print(garden, TRUE);
   // puts("");
 
-  int total_price = process(garden, FALSE);
+  int total_price = process(garden, TRUE);
   printf("Total price: %d\n", total_price);
 
   g_ptr_array_free(lines, TRUE);
